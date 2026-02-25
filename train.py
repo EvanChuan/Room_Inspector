@@ -446,7 +446,18 @@ def run_clip_linear_probe(data_dir: Path, ckpt_dir: Path):
 
     val_acc = clf.score(X_val, y_val)
     print(f"\n  驗證準確率：{val_acc:.4f}")
-    print("\n" + classification_report(y_val, clf.predict(X_val), target_names=CLASSES))
+    y_pred = clf.predict(X_val)
+    labels = list(range(len(CLASSES)))  # 固定 0..5 對應 6 類（含 worn）
+    print(
+        "\n" + classification_report(
+            y_val,
+            y_pred,
+            labels=labels,
+            target_names=CLASSES,
+            digits=4,
+            zero_division=0,
+        )
+    )
 
     ckpt_dir.mkdir(parents=True, exist_ok=True)
     pkl_path = ckpt_dir / "clip_linear_probe.pkl"

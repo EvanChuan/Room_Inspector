@@ -67,3 +67,6 @@ Thumbs.db
 !data/defects/peeling/.gitkeep
 !data/defects/worn/.gitkeep
 !user_photos/.gitkeep
+
+data/
+.data/

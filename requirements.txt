@@ -26,6 +26,7 @@ scikit-learn>=1.3.0      # Linear Probe、class_weight 計算
 # ── 資料集下載 ────────────────────────────────────────────────
 roboflow>=1.1.0          # Roboflow 資料集下載
 zenodo-get>=1.3.3        # DAGM Zenodo 下載（可選）
+PyYAML>=6.0              # 解析 Roboflow data.yaml（yolov8 格式）
 
 # ── 訓練工具 ──────────────────────────────────────────────────
 tqdm>=4.66.0             # 進度條

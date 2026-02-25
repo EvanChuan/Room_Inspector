@@ -1,0 +1,69 @@
+# =============================================================================
+# Room Inspector — .gitignore
+# =============================================================================
+
+# ── Python 虛擬環境 ───────────────────────────────────────────
+venv/
+.venv/
+env/
+
+# ── Python 快取 ───────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*$py.class
+*.pyo
+.pytest_cache/
+
+# ── 資料集（體積過大，不納入版控）────────────────────────────
+data/raw/           # 原始下載資料（BD3, SDNET2018, DAGM, Roboflow）
+data/defects/       # 整理後的訓練資料集
+user_photos/        # 台灣自拍房屋照片
+data/*.png          # verify 腳本產生的統計圖
+
+# ── 訓練產物 ──────────────────────────────────────────────────
+*.pt                # PyTorch 模型權重
+*.pth
+*.onnx
+*.pkl               # Pickle 模型（Linear Probe）
+runs/               # TensorBoard / 訓練 log
+logs/
+checkpoints/
+outputs/
+
+# ── API Key 與敏感資訊 ────────────────────────────────────────
+.env
+.env.*
+*.env
+secrets.yaml
+
+# ── Jupyter ───────────────────────────────────────────────────
+.ipynb_checkpoints/
+*.ipynb
+
+# ── IDE 設定 ──────────────────────────────────────────────────
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+
+# ── 壓縮檔（下載暫存）────────────────────────────────────────
+*.zip
+*.tar.gz
+*.tar.bz2
+
+# ── 例外：data 目錄的 .gitkeep 保留空資料夾結構 ────────────────
+!data/raw/.gitkeep
+!data/defects/.gitkeep
+!data/raw/bd3/.gitkeep
+!data/raw/sdnet2018/.gitkeep
+!data/raw/dagm/.gitkeep
+!data/raw/roboflow/.gitkeep
+!data/defects/normal/.gitkeep
+!data/defects/crack/.gitkeep
+!data/defects/stain/.gitkeep
+!data/defects/mold/.gitkeep
+!data/defects/peeling/.gitkeep
+!data/defects/worn/.gitkeep
+!user_photos/.gitkeep

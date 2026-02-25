@@ -1,0 +1,35 @@
+# =============================================================================
+# Room Inspector — 訓練環境依賴套件
+# =============================================================================
+# 安裝方式：
+#   source venv/bin/activate
+#   pip install -r requirements.txt
+#
+# PyTorch 需依照 CUDA 版本個別安裝（RTX 3060 建議 CUDA 12.x）：
+#   pip install torch torchvision --index-url https://download.pytorch.org/whl/cu121
+# =============================================================================
+
+# ── 核心深度學習 ──────────────────────────────────────────────
+# torch          # 請先手動安裝（見上方說明）
+# torchvision    # 請先手動安裝（見上方說明）
+timm>=0.9.0              # Swin-T / ConvNeXt 等訓練架構
+transformers>=4.35.0     # HuggingFace（CLIP / ViT）
+
+# ── CLIP（Layer 2 + Linear Probe）────────────────────────────
+openai-clip>=1.0.1       # OpenAI CLIP
+
+# ── 資料處理 ──────────────────────────────────────────────────
+Pillow>=10.0.0
+numpy>=1.24.0
+scikit-learn>=1.3.0      # Linear Probe、class_weight 計算
+
+# ── 資料集下載 ────────────────────────────────────────────────
+roboflow>=1.1.0          # Roboflow 資料集下載
+zenodo-get>=1.3.3        # DAGM Zenodo 下載（可選）
+
+# ── 訓練工具 ──────────────────────────────────────────────────
+tqdm>=4.66.0             # 進度條
+
+# ── 評估與可視化 ──────────────────────────────────────────────
+matplotlib>=3.7.0
+seaborn>=0.12.0          # Confusion matrix 視覺化

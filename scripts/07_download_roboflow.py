@@ -95,8 +95,8 @@ DATASETS = [
     # 鐵鏽/污漬（10K+ 張，對應 stain 類）
     ("rust-detection",      "rust-detection-38s6e",         1, "rust/corrosion（10,072 張）→ stain"),
 
-    # ── 牆面缺陷雜項 ──────────────────────────────────────────
-    ("wall-defects",        "wall-defects-ysyha",           1, "牆面缺陷雜項（crack/rust stain）"),
+    # ── 牆面缺陷雜項（版本需確認，先停用）──────────────────────
+    # ("wall-defects",      "wall-defects-ysyha",           2, "牆面缺陷雜項（crack/rust stain）"),
 ]
 
 # ── Roboflow 類別 → 本專案類別對應 ────────────────────────────
@@ -155,6 +155,16 @@ LABEL_MAP = {
 
 IMG_EXTS = {".jpg", ".jpeg", ".png"}
 
+# Roboflow 各種偵測/分割格式都需要 images/ + labels/ 結構
+DETECTION_FORMATS = {"object-detection", "instance-segmentation"}
+
+
+def _pick_download_format(proj_type: str) -> str:
+    """依 Roboflow 專案類型選擇下載格式。"""
+    if proj_type in DETECTION_FORMATS:
+        return "yolov8"   # images/ + labels/ + data.yaml
+    return "folder"       # train/<class>/ 分類格式
+
 
 def download_roboflow_datasets(api_key: str):
     print("=" * 60)
@@ -184,10 +194,16 @@ def download_roboflow_datasets(api_key: str):
         download_dir = RAW_ROBOFLOW / f"{workspace}_{project_name}_v{version}"
 
         try:
-            project = rf.workspace(workspace).project(project_name)
-            # 統一使用 "folder" 形式，Roboflow 會依資料集類型決定具體格式
-            dataset = project.version(version).download(
-                "folder",
+            project  = rf.workspace(workspace).project(project_name)
+            ver_obj  = project.version(version)
+
+            # ── 自動偵測專案類型，選擇對應格式 ─────────────────
+            proj_type   = getattr(project, "type", "classification")
+            dl_format   = _pick_download_format(proj_type)
+            print(f"  專案類型：{proj_type}  →  下載格式：{dl_format}")
+
+            ver_obj.download(
+                dl_format,
                 location=str(download_dir),
                 overwrite=False,
             )
@@ -200,7 +216,12 @@ def download_roboflow_datasets(api_key: str):
             continue
 
         # ── 整理圖片到目標類別資料夾 ────────────────────────────
-        copied = _organize_roboflow_folder(download_dir, TARGET_ROOT, workspace, project_name)
+        if dl_format == "folder":
+            copied = _organize_classification_folder(download_dir, TARGET_ROOT, workspace, project_name)
+        else:
+            # yolov8 / yolov8-seg 格式：從 data.yaml + labels 推斷類別
+            copied = _organize_yolov8_folder(download_dir, TARGET_ROOT, workspace, project_name)
+
         total_copied += copied
         print(f"  已整理 {copied} 張圖片到 data/defects/")
 
@@ -220,43 +241,27 @@ def download_roboflow_datasets(api_key: str):
     print()
 
 
-def _organize_roboflow_folder(
+def _organize_classification_folder(
     download_dir: Path,
     target_root: Path,
     workspace: str,
     project: str,
 ) -> int:
     """
-    通用整理邏輯（不管是 classification 或 object detection）：
+    整理 Roboflow 'folder' 分類格式：
+      download_dir/train/<class_name>/image.jpg
+      download_dir/valid/<class_name>/image.jpg
 
-    Roboflow "folder" 格式常見結構：
-      - download_dir/train/<class>/image.jpg
-      - download_dir/valid/<class>/image.jpg
-      - download_dir/test/<class>/image.jpg
-
-    或偵測格式：
-      - download_dir/train/images/image.jpg
-      - download_dir/train/labels/image.txt
-      - download_dir/valid/images/...
-      - 類別資訊藏在 YAML 或 labels 中
-
-    為了避免依賴 Roboflow 的 labels / YAML 格式，我們採用簡單策略：
-      1. 掃描所有子資料夾
-      2. 把「最底層的資料夾名稱」視為原始類別標籤（小寫）
-      3. 嘗試用 LABEL_MAP 映射到本專案類別（normal/crack/stain/mold/peeling）
-      4. 將圖片複製到對應的 data/defects/<target_class>/ 中
-
-    這樣即使資料集格式略有不同，也能最大化利用圖片。
+    直接從子資料夾名稱判斷類別。
     """
     copied = 0
     prefix = f"rf_{workspace[:6]}_{project[:8]}"
 
-    # 掃描所有含有圖片的資料夾
     for subdir in download_dir.rglob("*"):
         if not subdir.is_dir():
             continue
 
-        # 如果這個資料夾底下沒有圖片，略過
+        # 確認此資料夾直接含有圖片
         has_image = any(
             (subdir / f).suffix.lower() in IMG_EXTS
             for f in os.listdir(subdir)
@@ -265,26 +270,98 @@ def _organize_roboflow_folder(
         if not has_image:
             continue
 
-        cls_label_raw = subdir.name
-        cls_label = cls_label_raw.lower().strip()
-
+        cls_label = subdir.name.lower().strip()
         target_cls = LABEL_MAP.get(cls_label)
+
+        # 若自身名稱找不到，試試父資料夾（應對少數 nested 結構）
         if target_cls is None:
-            # 看看父資料夾是否是類別名（例如 classification/train/mold/）
             parent_label = subdir.parent.name.lower().strip()
             target_cls = LABEL_MAP.get(parent_label)
-            if target_cls is None:
-                # 找不到對應就略過
-                continue
+        if target_cls is None:
+            continue
 
         dst_dir = target_root / target_cls
-
         for img_name in os.listdir(subdir):
             img_path = subdir / img_name
             if not img_path.is_file() or img_path.suffix.lower() not in IMG_EXTS:
                 continue
-
             dst_name = f"{prefix}_{cls_label.replace(' ', '_')}_{img_path.name}"
+            dst_file = dst_dir / dst_name
+            if dst_file.exists():
+                continue
+            shutil.copy2(img_path, dst_file)
+            copied += 1
+
+    return copied
+
+
+def _organize_yolov8_folder(
+    download_dir: Path,
+    target_root: Path,
+    workspace: str,
+    project: str,
+) -> int:
+    """
+    整理 Roboflow 'yolov8' 偵測/分割格式：
+      download_dir/data.yaml          ← 類別名稱清單
+      download_dir/train/images/*.jpg ← 圖片
+      download_dir/train/labels/*.txt ← 每行: class_id cx cy w h
+
+    策略：
+      - 讀取 data.yaml 取得 class_names 清單
+      - 對每張圖片，找對應的 .txt label 檔
+      - 取 label 中出現最多的 class_id（dominant class）
+      - 用 LABEL_MAP 映射到本專案類別
+      - 無 label 的圖（背景）視為 normal
+    """
+    import yaml
+
+    copied = 0
+    prefix = f"rf_{workspace[:6]}_{project[:8]}"
+
+    # ── 讀取 class 名稱 ─────────────────────────────────────
+    yaml_file = download_dir / "data.yaml"
+    if not yaml_file.exists():
+        # 有些資料集 yaml 在子資料夾
+        candidates = list(download_dir.rglob("data.yaml"))
+        yaml_file  = candidates[0] if candidates else None
+
+    class_names: list[str] = []
+    if yaml_file and yaml_file.exists():
+        try:
+            with open(yaml_file) as f:
+                meta = yaml.safe_load(f)
+            raw_names = meta.get("names", [])
+            # YOLO yaml 的 names 可能是 list 或 dict {0: 'cls'}
+            if isinstance(raw_names, dict):
+                class_names = [raw_names[i] for i in sorted(raw_names)]
+            else:
+                class_names = list(raw_names)
+            print(f"  類別清單（data.yaml）：{class_names}")
+        except Exception as e:
+            print(f"  [警告] 讀取 data.yaml 失敗：{e}")
+
+    # ── 逐 split 處理 ────────────────────────────────────────
+    for split in ["train", "valid", "test"]:
+        images_dir = download_dir / split / "images"
+        labels_dir = download_dir / split / "labels"
+
+        if not images_dir.exists():
+            continue
+
+        for img_path in images_dir.iterdir():
+            if not img_path.is_file() or img_path.suffix.lower() not in IMG_EXTS:
+                continue
+
+            # 找 label 檔（同名 .txt）
+            label_file = labels_dir / (img_path.stem + ".txt")
+            target_cls = _label_to_class(label_file, class_names)
+
+            if target_cls is None:
+                continue  # 找不到對應類別就略過
+
+            dst_dir  = target_root / target_cls
+            dst_name = f"{prefix}_{target_cls}_{split}_{img_path.name}"
             dst_file = dst_dir / dst_name
             if dst_file.exists():
                 continue
@@ -293,6 +370,47 @@ def _organize_roboflow_folder(
             copied += 1
 
     return copied
+
+
+def _label_to_class(label_file: Path, class_names: list[str]) -> str | None:
+    """
+    從 YOLO .txt label 檔取得主要類別名稱。
+    - 若 label 為空（背景圖）→ "normal"
+    - 若有多個類別 → 取出現最多的
+    - 用 LABEL_MAP 對應到本專案類別
+    """
+    from collections import Counter
+
+    if not label_file.exists():
+        return None  # 沒有 label → 不知道類別，略過
+
+    try:
+        lines = label_file.read_text().strip().splitlines()
+    except Exception:
+        return None
+
+    if not lines:
+        return LABEL_MAP.get("normal")  # 空 label = 背景 = normal
+
+    # 統計各 class_id 出現次數，取最多的
+    ids = []
+    for line in lines:
+        parts = line.split()
+        if parts:
+            try:
+                ids.append(int(parts[0]))
+            except ValueError:
+                pass
+
+    if not ids:
+        return LABEL_MAP.get("normal")
+
+    dominant_id = Counter(ids).most_common(1)[0][0]
+    if dominant_id < len(class_names):
+        cls_name = class_names[dominant_id].lower().strip()
+        return LABEL_MAP.get(cls_name)
+
+    return None
 
 
 if __name__ == "__main__":

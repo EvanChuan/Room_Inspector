@@ -163,7 +163,7 @@ def organize_sdnet(max_per_source: int = 500):
     print("\n" + "─" * 60)
     print(f"  總計複製：{total_copied} 張  略過（已存在）：{total_skipped} 張")
     print("\n  目前各類別數量：")
-    for cls in ["normal", "crack", "stain", "mold", "peeling", "worn"]:
+    for cls in ["normal", "crack", "stain", "mold", "peeling"]:
         count = len([f for f in (TARGET_ROOT / cls).iterdir()
                      if f.suffix.lower() in {".jpg", ".jpeg", ".png"}])
         need_more = max(0, 200 - count)

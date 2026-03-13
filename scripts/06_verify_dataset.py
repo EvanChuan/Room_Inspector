@@ -32,7 +32,7 @@ from PIL import Image, UnidentifiedImageError
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 TARGET_ROOT  = PROJECT_ROOT / "data" / "defects"
 
-CLASSES       = ["normal", "crack", "stain", "mold", "peeling", "worn"]
+CLASSES       = ["normal", "crack", "stain", "mold", "peeling"]
 PATCH_SIZE    = 224
 IMG_EXTS      = {".jpg", ".jpeg", ".png", ".bmp"}
 RANDOM_SEED   = 42

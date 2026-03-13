@@ -181,7 +181,7 @@ def download_roboflow_datasets(api_key: str):
     RAW_ROBOFLOW.mkdir(parents=True, exist_ok=True)
 
     # 確保目標類別資料夾存在
-    for cls_name in ["normal", "crack", "stain", "mold", "peeling", "worn"]:
+    for cls_name in ["normal", "crack", "stain", "mold", "peeling"]:
         (TARGET_ROOT / cls_name).mkdir(parents=True, exist_ok=True)
 
     rf = Roboflow(api_key=api_key)
@@ -229,7 +229,7 @@ def download_roboflow_datasets(api_key: str):
     print("\n" + "─" * 60)
     print(f"  總計整理：{total_copied} 張")
     print("\n  目前各類別數量：")
-    for cls in ["normal", "crack", "stain", "mold", "peeling", "worn"]:
+    for cls in ["normal", "crack", "stain", "mold", "peeling"]:
         cls_dir = TARGET_ROOT / cls
         if not cls_dir.exists():
             count = 0

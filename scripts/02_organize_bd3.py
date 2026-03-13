@@ -2,7 +2,7 @@
 """
 02_organize_bd3.py
 ==================
-將 BD3 Dataset 整理並對應到本專案的 6 類缺陷結構。
+將 BD3 Dataset 整理並對應到本專案的 5 類缺陷結構。
 
 BD3 原始類別 → 本專案類別對應：
   normal/      → normal   （正常無缺陷）
@@ -100,7 +100,7 @@ def organize_bd3():
     print(f"  輸出目標：{TARGET_ROOT}")
 
     # ── 確認目標資料夾存在 ─────────────────────────────────────
-    for cls in ["normal", "crack", "stain", "mold", "peeling", "worn"]:
+    for cls in ["normal", "crack", "stain", "mold", "peeling"]:
         (TARGET_ROOT / cls).mkdir(parents=True, exist_ok=True)
 
     # ── 執行複製 ───────────────────────────────────────────────
@@ -143,7 +143,7 @@ def organize_bd3():
     print("\n" + "─" * 60)
     print(f"  總計複製：{total_copied} 張  略過（已存在）：{total_skipped} 張")
     print("\n  目前各類別數量：")
-    for cls in ["normal", "crack", "stain", "mold", "peeling", "worn"]:
+    for cls in ["normal", "crack", "stain", "mold", "peeling"]:
         count = len([f for f in (TARGET_ROOT / cls).iterdir()
                      if f.suffix.lower() in IMG_EXTENSIONS])
         bar_len = min(count // 20, 40)

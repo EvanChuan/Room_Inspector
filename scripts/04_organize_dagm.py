@@ -219,14 +219,14 @@ def organize_dagm(use_classes: list[int] = None, max_per_class: int = 300):
     print("\n  ⚠ 注意：DAGM 為灰階工業影像，建議作為輔助資料")
     print("    每類 DAGM 圖片不應超過同類總量的 30%")
     print("\n  目前各類別數量：")
-    for cls in ["normal", "crack", "stain", "mold", "peeling", "worn"]:
+    for cls in ["normal", "crack", "stain", "mold", "peeling"]:
         count = len([f for f in (TARGET_ROOT / cls).iterdir()
                      if f.suffix.lower() in {".jpg", ".jpeg", ".png"}])
         need_more = max(0, 200 - count)
         status = "✓ 達標" if count >= 200 else f"⚠ 還需 {need_more} 張"
         print(f"    {cls:10s}: {count:5d} 張  {status}")
 
-    print("\n  提醒：mold/worn/peeling 類別無對應公開資料集")
+    print("\n  提醒：mold/peeling 類別公開資料集較少")
     print("    → 請使用 scripts/05_extract_patches.py 從台灣房屋照片補充")
     print()
 

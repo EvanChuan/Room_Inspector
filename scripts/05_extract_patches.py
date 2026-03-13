@@ -12,7 +12,7 @@
          stain/     ← 有污漬的照片
          mold/      ← 有霉斑的照片
          peeling/   ← 有剝落的照片
-         worn/      ← 老舊磨損的照片
+         # worn 已移除（定義模糊，以明確缺陷類別為主）
 
   2. 執行腳本：
        python scripts/05_extract_patches.py --input user_photos/
@@ -43,7 +43,7 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_INPUT  = PROJECT_ROOT / "user_photos"
 DEFAULT_OUTPUT = PROJECT_ROOT / "data" / "defects"
 
-CLASSES       = ["normal", "crack", "stain", "mold", "peeling", "worn"]
+CLASSES       = ["normal", "crack", "stain", "mold", "peeling"]
 PATCH_SIZE    = 224
 IMG_EXTENSIONS = {".jpg", ".jpeg", ".png", ".bmp", ".webp", ".heic"}
 
@@ -237,7 +237,7 @@ def extract_patches(
         status = "✓ 達標" if count >= 200 else f"⚠ 還需 {need_more} 張"
         print(f"    {cls:10s}: {count:5d} 張  {status}")
 
-    print("\n  建議：mold、worn、peeling 類別最難收集")
+    print("\n  建議：mold、peeling 類別較難收集")
     print("    → 可從 591.com.tw、樂屋網 等台灣租屋平台截圖補充")
     print("    → 每類達到 200 張後執行：python scripts/06_verify_dataset.py")
     print()
@@ -250,7 +250,7 @@ def _cls_desc(cls: str) -> str:
         "stain":   "有污漬/水漬的照片",
         "mold":    "有霉斑（黑/綠點）的照片",
         "peeling": "有漆面/壁紙剝落的照片",
-        "worn":    "老舊磨損的磁磚/地板照片",
+        # worn 已移除
     }
     return desc.get(cls, "")
 

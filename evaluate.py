@@ -33,7 +33,7 @@ DATA_DIR     = PROJECT_ROOT / "data" / "defects"
 CKPT_DIR     = PROJECT_ROOT / "checkpoints"
 OUTPUT_DIR   = PROJECT_ROOT / "outputs" / "eval"
 
-CLASSES = ["normal", "crack", "stain", "mold", "peeling", "worn"]
+CLASSES = ["normal", "crack", "stain", "mold", "peeling"]
 IMG_SIZE = 224
 
 # 視覺化色彩
@@ -43,7 +43,6 @@ PALETTE = [
     "#FF9800",  # stain   — 橘
     "#9C27B0",  # mold    — 紫
     "#2196F3",  # peeling — 藍
-    "#795548",  # worn    — 棕
 ]
 
 
@@ -92,7 +91,7 @@ class DefectDataset(torch.utils.data.Dataset):
 def load_model(ckpt_path: Path, device: torch.device):
     """從 checkpoint 載入模型。"""
     print(f"載入 checkpoint：{ckpt_path}")
-    state = torch.load(ckpt_path, map_location="cpu")
+    state = torch.load(ckpt_path, map_location="cpu", weights_only=False)
 
     arch    = state.get("arch", "convnext_t")
     classes = state.get("classes", CLASSES)
@@ -417,12 +416,21 @@ def evaluate(args):
 
     model, arch, classes = load_model(ckpt_path, device)
 
-    # ── 建立資料集（整個 defects/ 做評估）────────────────────────
-    print(f"\n載入資料集：{DATA_DIR}")
-    dataset = DefectDataset(DATA_DIR, classes, transform=get_val_transforms())
+    # ── 決定評估資料來源 ──────────────────────────────────────────
+    if args.holdout_dir:
+        eval_data_dir = Path(args.holdout_dir)
+        print(f"\n載入獨立測試集：{eval_data_dir}")
+        print("  [嚴格評估模式] 使用未參與訓練的 holdout set")
+    else:
+        eval_data_dir = DATA_DIR
+        print(f"\n載入資料集：{eval_data_dir}")
+        print("  [注意] 使用全量 data/defects/，包含訓練資料（in-sample 評估）")
+        print("  若需嚴格評估，請用 --holdout-dir 指定獨立測試集目錄")
+
+    dataset = DefectDataset(eval_data_dir, classes, transform=get_val_transforms())
 
     if len(dataset) == 0:
-        raise RuntimeError(f"資料集為空：{DATA_DIR}")
+        raise RuntimeError(f"資料集為空：{eval_data_dir}")
 
     loader = DataLoader(
         dataset,
@@ -459,12 +467,14 @@ def evaluate(args):
 
     # ── 儲存預測結果 JSON ─────────────────────────────────────────
     results = {
-        "checkpoint":   str(ckpt_path),
-        "arch":         arch,
-        "classes":      classes,
-        "n_samples":    int(len(preds)),
-        "n_errors":     int((preds != labels).sum()),
-        "accuracy":     float((preds == labels).mean()),
+        "checkpoint":    str(ckpt_path),
+        "arch":          arch,
+        "classes":       classes,
+        "eval_mode":     "holdout" if args.holdout_dir else "in_sample",
+        "eval_data_dir": str(eval_data_dir),
+        "n_samples":     int(len(preds)),
+        "n_errors":      int((preds != labels).sum()),
+        "accuracy":      float((preds == labels).mean()),
         "per_class": {},
     }
     from sklearn.metrics import precision_recall_fscore_support
@@ -518,6 +528,13 @@ def parse_args():
         "--data-dir",
         default=str(DATA_DIR),
         help=f"資料集目錄（預設：{DATA_DIR}）",
+    )
+    parser.add_argument(
+        "--holdout-dir",
+        default=None,
+        metavar="DIR",
+        help="獨立測試集目錄（格式同 data/defects/，不含訓練資料）。"
+             "未指定時使用全量 data/defects/（in-sample 評估）",
     )
     return parser.parse_args()
 

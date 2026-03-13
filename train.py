@@ -35,8 +35,8 @@ DATA_DIR     = PROJECT_ROOT / "data" / "defects"
 CKPT_DIR     = PROJECT_ROOT / "checkpoints"
 LOG_DIR      = PROJECT_ROOT / "runs"
 
-# 全部 6 類（訓練時若某類無資料會自動跳過）
-ALL_CLASSES = ["normal", "crack", "stain", "mold", "peeling", "worn"]
+# 5 類（worn 已移除：老舊磨損定義模糊，以明確缺陷為主）
+ALL_CLASSES = ["normal", "crack", "stain", "mold", "peeling"]
 CLASSES   = ALL_CLASSES   # 實際使用類別在 train() 內動態決定
 N_CLASSES = len(CLASSES)
 
@@ -362,7 +362,7 @@ def save_checkpoint(state: dict, is_best: bool, ckpt_dir: Path):
 
 
 def load_checkpoint(ckpt_path: Path, model, optimizer=None, scaler=None):
-    state = torch.load(ckpt_path, map_location="cpu")
+    state = torch.load(ckpt_path, map_location="cpu", weights_only=False)
     model.load_state_dict(state["model"])
     if optimizer and "optimizer" in state:
         optimizer.load_state_dict(state["optimizer"])
@@ -447,13 +447,14 @@ def run_clip_linear_probe(data_dir: Path, ckpt_dir: Path):
     val_acc = clf.score(X_val, y_val)
     print(f"\n  驗證準確率：{val_acc:.4f}")
     y_pred = clf.predict(X_val)
-    labels = list(range(len(CLASSES)))  # 固定 0..5 對應 6 類（含 worn）
+    # 只列出實際出現在資料中的類別（避免 worn=0 時型別不符問題）
+    present_classes = [c for c in CLASSES if c in set(y_val) | set(y_pred)]
     print(
         "\n" + classification_report(
             y_val,
             y_pred,
-            labels=labels,
-            target_names=CLASSES,
+            labels=present_classes,
+            target_names=present_classes,
             digits=4,
             zero_division=0,
         )

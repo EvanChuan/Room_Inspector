@@ -3,12 +3,12 @@
 train.py
 ========
 Room Inspector — Layer 3 訓練腳本
-支援 ConvNeXt-T（小資料優先）和 Swin-T（資料量充足時）
+支援 ConvNeXt-B（384px，主力）和 Swin-B（384px，備選）
 
 使用方式：
   python train.py                          # 自動選擇架構
-  python train.py --arch swin_t            # 指定 Swin-T
-  python train.py --arch convnext_t        # 指定 ConvNeXt-T
+  python train.py --arch convnext_b_384    # 指定 ConvNeXt-B 384（推薦）
+  python train.py --arch swin_b_384        # 指定 Swin-B 384
   python train.py --resume checkpoints/best.pt  # 繼續訓練
   python train.py --stage linear           # 只做 CLIP Linear Probe（Stage 1）
 """
@@ -35,28 +35,28 @@ DATA_DIR     = PROJECT_ROOT / "data" / "defects"
 CKPT_DIR     = PROJECT_ROOT / "checkpoints"
 LOG_DIR      = PROJECT_ROOT / "runs"
 
-# 5 類（worn 已移除：老舊磨損定義模糊，以明確缺陷為主）
 ALL_CLASSES = ["normal", "crack", "stain", "mold", "peeling"]
-CLASSES   = ALL_CLASSES   # 實際使用類別在 train() 內動態決定
+CLASSES   = ALL_CLASSES
 N_CLASSES = len(CLASSES)
 
-IMG_SIZE   = 224
-PATCH_SIZE = 224
+# 升至 384，匹配 640×360 輸入的有效解析度
+IMG_SIZE   = 384
+PATCH_SIZE = 384
 
 # 訓練超參數
-EPOCHS_LINEAR   = 10    # Stage 1: Linear Probe
-EPOCHS_FINETUNE = 30    # Stage 2/3: Fine-tune
-BATCH_SIZE      = 32
-WARMUP_EPOCHS   = 3
+EPOCHS_LINEAR   = 10
+EPOCHS_FINETUNE = 40    # 384px 模型收斂較慢，從 30 提升至 40
+BATCH_SIZE      = 16    # BATCH_SIZE 從 32 降至 16（384px 單張 GPU 記憶體約 2× 224px）
+WARMUP_EPOCHS   = 5     # warmup 從 3 增加到 5（配合更大模型）
 LABEL_SMOOTHING = 0.1
 WEIGHT_DECAY    = 0.01
-BASE_LR         = 3e-4  # Linear Probe / 最後一層
-FINETUNE_LR     = 1e-4  # Fine-tune（backbone）
+BASE_LR         = 2e-4  # 稍微降低（384px 模型梯度更大）
+FINETUNE_LR     = 5e-5  # fine-tune LR 從 1e-4 降至 5e-5
 MIN_LR          = 1e-6
 
-# 最低資料量（Swin-T 需求更高）
-MIN_SAMPLES_SWIN     = 200  # 每類至少 200 張
-MIN_SAMPLES_CONVNEXT = 100  # 每類至少 100 張
+# 384px 模型需要更多資料才能泛化
+MIN_SAMPLES_CONVNEXT_B = 150   # ConvNeXt-B 384 每類最少 150 張
+MIN_SAMPLES_SWIN_B     = 250   # Swin-B 384 每類最少 250 張
 
 SEED = 42
 
@@ -72,7 +72,6 @@ def set_seed(seed: int):
 
 
 def count_class_samples(data_dir: Path) -> dict:
-    """統計各類別圖片數量。"""
     IMG_EXTS = {".jpg", ".jpeg", ".png", ".bmp"}
     counts = {}
     for cls in CLASSES:
@@ -85,11 +84,6 @@ def count_class_samples(data_dir: Path) -> dict:
 
 
 def compute_class_weights(counts: dict, active_classes: list) -> torch.Tensor:
-    """
-    計算 balanced class weights（只含有資料的類別）。
-    公式：weight[i] = total / (n_classes * count[i])
-    正規化使最小 weight = 1.0
-    """
     total = sum(counts[c] for c in active_classes)
     n_cls = len(active_classes)
     weights = []
@@ -103,28 +97,38 @@ def compute_class_weights(counts: dict, active_classes: list) -> torch.Tensor:
 
 
 def auto_select_arch(counts: dict, active_classes: list) -> str:
-    """根據資料量自動選擇訓練架構（只看有資料的類別）。"""
+    """新的自動選擇邏輯，優先推薦 convnext_b_384。
+    RTX 3060 12GB：ConvNeXt-B 384 在 BATCH=16 FP16 下約佔 9-10GB，安全。
+    """
     min_count = min(counts[c] for c in active_classes)
-    if min_count >= MIN_SAMPLES_SWIN:
-        return "swin_t"
-    elif min_count >= MIN_SAMPLES_CONVNEXT:
-        return "convnext_t"
+    if min_count >= MIN_SAMPLES_SWIN_B:
+        print(f"  資料量充足（最少類別 {min_count} 張），使用 Swin-B 384")
+        return "swin_b_384"
+    elif min_count >= MIN_SAMPLES_CONVNEXT_B:
+        print(f"  資料量中等（最少類別 {min_count} 張），使用 ConvNeXt-B 384（推薦）")
+        return "convnext_b_384"
     else:
-        print(f"[警告] 最少類別只有 {min_count} 張，建議先用 CLIP Linear Probe（--stage linear）")
-        return "convnext_t"
+        print(f"  [警告] 最少類別只有 {min_count} 張，仍使用 ConvNeXt-B 384")
+        print(f"  建議先執行 CLIP Linear Probe：python train.py --stage linear")
+        return "convnext_b_384"
 
 
 # ── 資料增強 ──────────────────────────────────────────────────────────
 
 def get_train_transforms():
-    """完整訓練資料增強。"""
+    """針對 640×360 室內場景強化增強策略。
+    - RandomResizedCrop 範圍縮小至 (0.5, 1.0)，讓模型學習更多局部細節
+    - 加入 RandomRotation 模擬手持拍攝角度偏差
+    - ColorJitter 強度提升，模擬室內光線不均
+    """
     return transforms.Compose([
-        transforms.RandomResizedCrop(IMG_SIZE, scale=(0.6, 1.0), ratio=(0.75, 1.33)),
+        transforms.RandomResizedCrop(IMG_SIZE, scale=(0.5, 1.0), ratio=(0.75, 1.33)),
         transforms.RandomHorizontalFlip(p=0.5),
         transforms.RandomVerticalFlip(p=0.2),
-        transforms.ColorJitter(brightness=0.3, contrast=0.3, saturation=0.2, hue=0.05),
+        transforms.RandomRotation(degrees=10),
+        transforms.ColorJitter(brightness=0.4, contrast=0.4, saturation=0.3, hue=0.08),
         transforms.RandomGrayscale(p=0.05),
-        transforms.RandomApply([transforms.GaussianBlur(kernel_size=3)], p=0.3),
+        transforms.RandomApply([transforms.GaussianBlur(kernel_size=5)], p=0.3),
         transforms.ToTensor(),
         transforms.Normalize(mean=[0.485, 0.456, 0.406],
                              std=[0.229, 0.224, 0.225]),
@@ -133,10 +137,10 @@ def get_train_transforms():
 
 
 def get_val_transforms():
-    """驗證集標準前處理。"""
+    """對應 384px 的驗證前處理。"""
     return transforms.Compose([
-        transforms.Resize(int(IMG_SIZE * 1.14)),  # 256 for 224
-        transforms.CenterCrop(IMG_SIZE),
+        transforms.Resize(int(IMG_SIZE * 1.14)),   # 438
+        transforms.CenterCrop(IMG_SIZE),            # 384
         transforms.ToTensor(),
         transforms.Normalize(mean=[0.485, 0.456, 0.406],
                              std=[0.229, 0.224, 0.225]),
@@ -146,9 +150,6 @@ def get_val_transforms():
 # ── 資料集 ────────────────────────────────────────────────────────────
 
 def build_datasets(data_dir: Path, val_split: float = 0.15):
-    """
-    從 data/defects/ 建立訓練/驗證集（按比例切分）。
-    """
     IMG_EXTS = {".jpg", ".jpeg", ".png", ".bmp"}
     all_images = []
     for cls_idx, cls in enumerate(CLASSES):
@@ -163,8 +164,6 @@ def build_datasets(data_dir: Path, val_split: float = 0.15):
         raise RuntimeError(f"在 {data_dir} 找不到任何圖片，請先執行資料整理腳本。")
 
     random.shuffle(all_images)
-
-    # 按類別分層切分
     train_images, val_images = [], []
     by_class: dict = {i: [] for i in range(N_CLASSES)}
     for img_path, cls_idx in all_images:
@@ -177,13 +176,10 @@ def build_datasets(data_dir: Path, val_split: float = 0.15):
 
     print(f"  訓練集：{len(train_images)} 張")
     print(f"  驗證集：{len(val_images)} 張")
-
     return train_images, val_images
 
 
 class DefectDataset(torch.utils.data.Dataset):
-    """自定義資料集，支援路徑列表輸入。"""
-
     def __init__(self, samples: list, transform=None):
         self.samples = samples
         self.transform = transform
@@ -201,11 +197,9 @@ class DefectDataset(torch.utils.data.Dataset):
 
 
 def build_weighted_sampler(train_samples: list) -> WeightedRandomSampler:
-    """建立加權採樣器，緩解類別不平衡。"""
     label_counts = [0] * N_CLASSES
     for _, lbl in train_samples:
         label_counts[lbl] += 1
-
     class_weights = [1.0 / max(c, 1) for c in label_counts]
     sample_weights = [class_weights[lbl] for _, lbl in train_samples]
     return WeightedRandomSampler(
@@ -218,16 +212,19 @@ def build_weighted_sampler(train_samples: list) -> WeightedRandomSampler:
 # ── 模型建立 ──────────────────────────────────────────────────────────
 
 def build_model(arch: str, n_classes: int, pretrained: bool = True) -> nn.Module:
-    """建立模型（ConvNeXt-T 或 Swin-T）。"""
     try:
         import timm
     except ImportError:
-        raise ImportError("請安裝 timm：pip install timm")
+        raise ImportError("請安裝 timm：pip install timm>=1.0.0")
 
     arch_map = {
+        # ── 主力（384px，針對 640×360 輸入）──────────────────────
+        "convnext_b_384": "convnext_base.fb_in22k_ft_in1k_384",
+        "swin_b_384":     "swin_base_patch4_window12_384.ms_in22k_ft_in1k",
+
+        # ── 備用（224px，資料極少時的 fallback）─────────────────
         "convnext_t": "convnext_tiny.fb_in22k_ft_in1k",
         "swin_t":     "swin_tiny_patch4_window7_224.ms_in22k_ft_in1k",
-        # 備用（資料量非常少時）
         "convnext_s": "convnext_small.fb_in22k_ft_in1k",
         "swin_s":     "swin_small_patch4_window7_224.ms_in22k_ft_in1k",
     }
@@ -244,9 +241,7 @@ def build_model(arch: str, n_classes: int, pretrained: bool = True) -> nn.Module
 
 
 def freeze_backbone(model, arch: str):
-    """凍結 backbone，只訓練分類頭。"""
     for name, param in model.named_parameters():
-        # ConvNeXt 的分類頭叫 head，Swin 也叫 head
         if "head" in name:
             param.requires_grad = True
         else:
@@ -256,10 +251,9 @@ def freeze_backbone(model, arch: str):
 
 
 def unfreeze_backbone(model, freeze_patch_embed: bool = True):
-    """解凍全部參數（fine-tune 階段）。"""
     for name, param in model.named_parameters():
         if freeze_patch_embed and "patch_embed" in name:
-            param.requires_grad = False  # Patch embedding 通常不需要 fine-tune
+            param.requires_grad = False
         else:
             param.requires_grad = True
     n_train = sum(p.numel() for p in model.parameters() if p.requires_grad)
@@ -269,8 +263,6 @@ def unfreeze_backbone(model, freeze_patch_embed: bool = True):
 # ── 學習率排程 ────────────────────────────────────────────────────────
 
 class WarmupCosineScheduler(optim.lr_scheduler._LRScheduler):
-    """Warmup + Cosine Annealing。"""
-
     def __init__(self, optimizer, warmup_epochs, total_epochs, min_lr=1e-6, last_epoch=-1):
         self.warmup_epochs = warmup_epochs
         self.total_epochs = total_epochs
@@ -285,11 +277,10 @@ class WarmupCosineScheduler(optim.lr_scheduler._LRScheduler):
             progress = (epoch - self.warmup_epochs) / max(self.total_epochs - self.warmup_epochs, 1)
             factor = 0.5 * (1.0 + np.cos(np.pi * progress))
             factor = self.min_lr / self.base_lrs[0] + (1 - self.min_lr / self.base_lrs[0]) * factor
-
         return [base_lr * factor for base_lr in self.base_lrs]
 
 
-# ── 訓練單個 epoch ────────────────────────────────────────────────────
+# ── 訓練 / 驗證 ───────────────────────────────────────────────────────
 
 def train_one_epoch(model, loader, criterion, optimizer, scaler, device, epoch):
     model.train()
@@ -298,7 +289,6 @@ def train_one_epoch(model, loader, criterion, optimizer, scaler, device, epoch):
     for batch_idx, (images, labels) in enumerate(loader):
         images = images.to(device, non_blocking=True)
         labels = labels.to(device, non_blocking=True)
-
         optimizer.zero_grad(set_to_none=True)
 
         with autocast():
@@ -321,9 +311,7 @@ def train_one_epoch(model, loader, criterion, optimizer, scaler, device, epoch):
                   f"  loss={loss.item():.4f}"
                   f"  acc={total_correct/total_samples:.4f}")
 
-    avg_loss = total_loss / total_samples
-    avg_acc  = total_correct / total_samples
-    return avg_loss, avg_acc
+    return total_loss / total_samples, total_correct / total_samples
 
 
 @torch.no_grad()
@@ -334,22 +322,18 @@ def validate(model, loader, criterion, device):
     for images, labels in loader:
         images = images.to(device, non_blocking=True)
         labels = labels.to(device, non_blocking=True)
-
         with autocast():
             logits = model(images)
             loss = criterion(logits, labels)
-
         preds = logits.argmax(dim=1)
         total_loss += loss.item() * images.size(0)
         total_correct += (preds == labels).sum().item()
         total_samples += images.size(0)
 
-    avg_loss = total_loss / total_samples
-    avg_acc  = total_correct / total_samples
-    return avg_loss, avg_acc
+    return total_loss / total_samples, total_correct / total_samples
 
 
-# ── 儲存 / 讀取 checkpoint ────────────────────────────────────────────
+# ── Checkpoint 存取 ───────────────────────────────────────────────────
 
 def save_checkpoint(state: dict, is_best: bool, ckpt_dir: Path):
     ckpt_dir.mkdir(parents=True, exist_ok=True)
@@ -378,10 +362,6 @@ def load_checkpoint(ckpt_path: Path, model, optimizer=None, scaler=None):
 # ── Stage 1：CLIP Linear Probe ────────────────────────────────────────
 
 def run_clip_linear_probe(data_dir: Path, ckpt_dir: Path):
-    """
-    CLIP Linear Probe：用 CLIP 特徵 + scikit-learn LogisticRegression。
-    每類只需 30~50 張即可獲得合理基準。
-    """
     print("\n" + "=" * 60)
     print("  Stage 1：CLIP Linear Probe")
     print("=" * 60)
@@ -393,7 +373,6 @@ def run_clip_linear_probe(data_dir: Path, ckpt_dir: Path):
 
     try:
         from sklearn.linear_model import LogisticRegression
-        from sklearn.preprocessing import LabelEncoder
         from sklearn.metrics import classification_report
         import pickle
     except ImportError:
@@ -432,7 +411,6 @@ def run_clip_linear_probe(data_dir: Path, ckpt_dir: Path):
         print("  [錯誤] 無法提取特徵，請確認資料集路徑")
         return
 
-    # 分層切分
     from sklearn.model_selection import StratifiedShuffleSplit
     sss = StratifiedShuffleSplit(n_splits=1, test_size=0.15, random_state=SEED)
     train_idx, val_idx = next(sss.split(X, y))
@@ -440,25 +418,15 @@ def run_clip_linear_probe(data_dir: Path, ckpt_dir: Path):
     y_train, y_val = y[train_idx], y[val_idx]
 
     print(f"\n  訓練：{len(X_train)}  驗證：{len(X_val)}")
-    print("  訓練 Logistic Regression...")
     clf = LogisticRegression(max_iter=1000, C=1.0, random_state=SEED, n_jobs=-1)
     clf.fit(X_train, y_train)
 
     val_acc = clf.score(X_val, y_val)
     print(f"\n  驗證準確率：{val_acc:.4f}")
     y_pred = clf.predict(X_val)
-    # 只列出實際出現在資料中的類別（避免 worn=0 時型別不符問題）
     present_classes = [c for c in CLASSES if c in set(y_val) | set(y_pred)]
-    print(
-        "\n" + classification_report(
-            y_val,
-            y_pred,
-            labels=present_classes,
-            target_names=present_classes,
-            digits=4,
-            zero_division=0,
-        )
-    )
+    print("\n" + classification_report(y_val, y_pred, labels=present_classes,
+                                       target_names=present_classes, digits=4, zero_division=0))
 
     ckpt_dir.mkdir(parents=True, exist_ok=True)
     pkl_path = ckpt_dir / "clip_linear_probe.pkl"
@@ -476,51 +444,47 @@ def train(args):
     print(f"\n使用裝置：{device}")
     if device.type == "cuda":
         print(f"  GPU：{torch.cuda.get_device_name(0)}")
-        print(f"  VRAM：{torch.cuda.get_device_properties(0).total_memory // 1024**3} GB")
+        vram_gb = torch.cuda.get_device_properties(0).total_memory // 1024**3
+        print(f"  VRAM：{vram_gb} GB")
+        if vram_gb < 10:
+            global BATCH_SIZE
+            BATCH_SIZE = 8
+            print(f"  [警告] VRAM < 10GB，自動將 BATCH_SIZE 降至 8")
 
-    # ── Stage 1 only ──────────────────────────────────────────────
     if args.stage == "linear":
         run_clip_linear_probe(DATA_DIR, CKPT_DIR)
         return
 
-    # ── 統計資料量 ────────────────────────────────────────────────
     print("\n資料集統計：")
     counts = count_class_samples(DATA_DIR)
     total = sum(counts.values())
     for cls, cnt in counts.items():
         if cnt == 0:
             status = "✗ 跳過"
-        elif cnt < MIN_SAMPLES_CONVNEXT:
-            status = "⚠ 不足"
+        elif cnt < MIN_SAMPLES_CONVNEXT_B:
+            status = "⚠ 不足（建議≥150）"
         else:
             status = "✓"
         print(f"  {status} {cls:10s}: {cnt:5d} 張")
     print(f"  總計：{total} 張")
 
     if total == 0:
-        raise RuntimeError(
-            f"資料集目錄 {DATA_DIR} 為空，請先執行資料整理腳本：\n"
-            "  python scripts/03_organize_sdnet.py\n"
-            "  python scripts/07_download_roboflow.py --api-key YOUR_KEY"
-        )
+        raise RuntimeError(f"資料集目錄 {DATA_DIR} 為空")
 
-    # ── 決定實際訓練類別（跳過空類別）────────────────────────────
     active_classes = [cls for cls in ALL_CLASSES if counts.get(cls, 0) > 0]
     skipped = [cls for cls in ALL_CLASSES if counts.get(cls, 0) == 0]
     if skipped:
-        print(f"\n  [注意] 以下類別無資料，本次訓練跳過：{skipped}")
+        print(f"\n  [注意] 跳過類別：{skipped}")
         print(f"  [注意] 實際訓練類別（{len(active_classes)} 類）：{active_classes}")
     global CLASSES, N_CLASSES
     CLASSES   = active_classes
     N_CLASSES = len(active_classes)
 
-    # ── 自動選擇架構 ──────────────────────────────────────────────
     arch = args.arch
     if arch == "auto":
         arch = auto_select_arch(counts, active_classes)
-    print(f"\n使用架構：{arch}")
+    print(f"\n使用架構：{arch}  輸入解析度：{IMG_SIZE}×{IMG_SIZE}")
 
-    # ── 建立資料集 ────────────────────────────────────────────────
     print("\n建立資料集...")
     train_samples, val_samples = build_datasets(DATA_DIR, val_split=0.15)
 
@@ -528,51 +492,28 @@ def train(args):
     val_dataset   = DefectDataset(val_samples,   transform=get_val_transforms())
 
     sampler = build_weighted_sampler(train_samples)
-    train_loader = DataLoader(
-        train_dataset,
-        batch_size=BATCH_SIZE,
-        sampler=sampler,
-        num_workers=4,
-        pin_memory=True,
-        drop_last=True,
-    )
-    val_loader = DataLoader(
-        val_dataset,
-        batch_size=BATCH_SIZE * 2,
-        shuffle=False,
-        num_workers=4,
-        pin_memory=True,
-    )
+    # num_workers 從 4 降至 2（384px 影像 IO 更重）
+    train_loader = DataLoader(train_dataset, batch_size=BATCH_SIZE, sampler=sampler,
+                              num_workers=2, pin_memory=True, drop_last=True)
+    val_loader   = DataLoader(val_dataset,   batch_size=BATCH_SIZE * 2, shuffle=False,
+                              num_workers=2, pin_memory=True)
 
-    # ── 建立模型 ──────────────────────────────────────────────────
     print("\n建立模型...")
     model = build_model(arch, N_CLASSES, pretrained=True)
     model = model.to(device)
 
-    # ── class weights ─────────────────────────────────────────────
     class_weights = compute_class_weights(counts, active_classes).to(device)
     print(f"\nclass_weights: {dict(zip(active_classes, class_weights.tolist()))}")
 
-    criterion = nn.CrossEntropyLoss(
-        weight=class_weights,
-        label_smoothing=LABEL_SMOOTHING,
-    )
-
-    # ── FP16 Scaler ───────────────────────────────────────────────
+    criterion = nn.CrossEntropyLoss(weight=class_weights, label_smoothing=LABEL_SMOOTHING)
     scaler = GradScaler(enabled=(device.type == "cuda"))
 
-    # ── TensorBoard ───────────────────────────────────────────────
     LOG_DIR.mkdir(parents=True, exist_ok=True)
     run_name = f"{arch}_{time.strftime('%Y%m%d_%H%M%S')}"
     writer = SummaryWriter(LOG_DIR / run_name)
 
     best_val_acc = 0.0
     start_epoch  = 1
-
-    # ── 決定訓練階段 ──────────────────────────────────────────────
-    # stage = "all"：Stage 1(Linear Probe) → Stage 2(frozen backbone) → Stage 3(full finetune)
-    # stage = "finetune"：直接 full fine-tune（有 checkpoint 時常用）
-    # stage = "swin"：同 finetune，但確保使用 swin_t
 
     stages = []
     if args.stage in ("all",):
@@ -581,34 +522,27 @@ def train(args):
             {"name": "finetune", "epochs": EPOCHS_FINETUNE, "freeze": False, "lr": FINETUNE_LR},
         ]
     else:
-        # 單階段 full fine-tune
         stages = [
             {"name": "finetune", "epochs": EPOCHS_FINETUNE, "freeze": False, "lr": FINETUNE_LR},
         ]
 
-    # ── 載入 checkpoint（如果有）──────────────────────────────────
     if args.resume:
         resume_path = Path(args.resume)
         if resume_path.exists():
             optimizer = optim.AdamW(
                 filter(lambda p: p.requires_grad, model.parameters()),
-                lr=FINETUNE_LR,
-                weight_decay=WEIGHT_DECAY,
+                lr=FINETUNE_LR, weight_decay=WEIGHT_DECAY,
             )
             start_epoch, best_val_acc = load_checkpoint(resume_path, model, optimizer, scaler)
-            # 直接進 finetune 模式
             stages = [{"name": "resumed", "epochs": EPOCHS_FINETUNE, "freeze": False, "lr": FINETUNE_LR}]
         else:
             print(f"  [警告] checkpoint 不存在：{args.resume}，從頭訓練")
 
-    # ── 執行各訓練階段 ────────────────────────────────────────────
     global_epoch = start_epoch
 
     for stage in stages:
-        stage_name   = stage["name"]
-        stage_epochs = stage["epochs"]
-        stage_lr     = stage["lr"]
-        stage_freeze = stage["freeze"]
+        stage_name, stage_epochs = stage["name"], stage["epochs"]
+        stage_lr, stage_freeze = stage["lr"], stage["freeze"]
 
         print(f"\n{'=' * 60}")
         print(f"  階段：{stage_name}  epochs={stage_epochs}  lr={stage_lr}  freeze={stage_freeze}")
@@ -621,32 +555,24 @@ def train(args):
 
         optimizer = optim.AdamW(
             filter(lambda p: p.requires_grad, model.parameters()),
-            lr=stage_lr,
-            weight_decay=WEIGHT_DECAY,
-            betas=(0.9, 0.999),
+            lr=stage_lr, weight_decay=WEIGHT_DECAY, betas=(0.9, 0.999),
         )
         scheduler = WarmupCosineScheduler(
-            optimizer,
-            warmup_epochs=WARMUP_EPOCHS,
-            total_epochs=stage_epochs,
-            min_lr=MIN_LR,
+            optimizer, warmup_epochs=WARMUP_EPOCHS,
+            total_epochs=stage_epochs, min_lr=MIN_LR,
         )
 
         for epoch in range(1, stage_epochs + 1):
             print(f"\n[Epoch {global_epoch}] lr={scheduler.get_last_lr()[0]:.6f}")
-
             train_loss, train_acc = train_one_epoch(
-                model, train_loader, criterion, optimizer, scaler, device, global_epoch
-            )
+                model, train_loader, criterion, optimizer, scaler, device, global_epoch)
             val_loss, val_acc = validate(model, val_loader, criterion, device)
-
             scheduler.step()
 
             is_best = val_acc > best_val_acc
             if is_best:
                 best_val_acc = val_acc
 
-            # TensorBoard 記錄
             writer.add_scalars("Loss", {"train": train_loss, "val": val_loss}, global_epoch)
             writer.add_scalars("Acc",  {"train": train_acc,  "val": val_acc},  global_epoch)
             writer.add_scalar("LR", scheduler.get_last_lr()[0], global_epoch)
@@ -656,17 +582,11 @@ def train(args):
                   f"  best={best_val_acc:.4f}")
 
             save_checkpoint(
-                {
-                    "epoch":        global_epoch,
-                    "arch":         arch,
-                    "model":        model.state_dict(),
-                    "optimizer":    optimizer.state_dict(),
-                    "scaler":       scaler.state_dict(),
-                    "best_val_acc": best_val_acc,
-                    "classes":      active_classes,
-                },
-                is_best=is_best,
-                ckpt_dir=CKPT_DIR,
+                {"epoch": global_epoch, "arch": arch, "model": model.state_dict(),
+                 "optimizer": optimizer.state_dict(), "scaler": scaler.state_dict(),
+                 "best_val_acc": best_val_acc, "classes": active_classes,
+                 "img_size": IMG_SIZE},
+                is_best=is_best, ckpt_dir=CKPT_DIR,
             )
             global_epoch += 1
 
@@ -675,14 +595,11 @@ def train(args):
     print(f"\n{'=' * 60}")
     print(f"  訓練完成！最佳驗證準確率：{best_val_acc:.4f}")
     print(f"  最佳 checkpoint：{CKPT_DIR / 'best.pt'}")
-    print(f"  TensorBoard：tensorboard --logdir {LOG_DIR}")
     print(f"{'=' * 60}\n")
 
-    # 儲存訓練配置（方便 evaluate.py 讀取）
     config = {
-        "arch":         arch,
-        "classes":      active_classes,
-        "img_size":     IMG_SIZE,
+        "arch": arch, "classes": active_classes,
+        "img_size": IMG_SIZE,
         "best_val_acc": best_val_acc,
         "class_weights": compute_class_weights(counts, active_classes).tolist(),
     }
@@ -695,53 +612,23 @@ def train(args):
 # ── CLI ───────────────────────────────────────────────────────────────
 
 def parse_args():
-    parser = argparse.ArgumentParser(
-        description="Room Inspector Layer 3 訓練腳本",
-        formatter_class=argparse.RawDescriptionHelpFormatter,
-    )
-    parser.add_argument(
-        "--arch",
-        default="auto",
-        choices=["auto", "convnext_t", "swin_t", "convnext_s", "swin_s"],
-        help="訓練架構（預設：auto 自動選擇）",
-    )
-    parser.add_argument(
-        "--stage",
-        default="all",
+    parser = argparse.ArgumentParser(description="Room Inspector Layer 3 訓練腳本")
+    parser.add_argument("--arch", default="auto",
+        choices=["auto", "convnext_b_384", "swin_b_384",
+                 "convnext_t", "swin_t", "convnext_s", "swin_s"],
+        help="訓練架構（預設：auto → convnext_b_384）")
+    parser.add_argument("--stage", default="all",
         choices=["all", "linear", "finetune", "swin"],
-        help="訓練階段（all=完整三階段, linear=只做 CLIP Probe, finetune=直接 fine-tune）",
-    )
-    parser.add_argument(
-        "--resume",
-        default=None,
-        metavar="CKPT",
-        help="從 checkpoint 繼續訓練",
-    )
-    parser.add_argument(
-        "--epochs",
-        type=int,
-        default=None,
-        help="覆蓋 fine-tune epochs（預設：30）",
-    )
-    parser.add_argument(
-        "--batch-size",
-        type=int,
-        default=BATCH_SIZE,
-        help=f"Batch size（預設：{BATCH_SIZE}）",
-    )
-    parser.add_argument(
-        "--lr",
-        type=float,
-        default=None,
-        help="學習率（預設：fine-tune 用 1e-4）",
-    )
+        help="訓練階段")
+    parser.add_argument("--resume", default=None, metavar="CKPT")
+    parser.add_argument("--epochs", type=int, default=None)
+    parser.add_argument("--batch-size", type=int, default=BATCH_SIZE)
+    parser.add_argument("--lr", type=float, default=None)
     return parser.parse_args()
 
 
 if __name__ == "__main__":
     args = parse_args()
-
-    # 覆蓋全域超參數
     if args.epochs is not None:
         EPOCHS_FINETUNE = args.epochs
     if args.batch_size != BATCH_SIZE:
@@ -749,5 +636,4 @@ if __name__ == "__main__":
     if args.lr is not None:
         FINETUNE_LR = args.lr
         BASE_LR = args.lr
-
     train(args)

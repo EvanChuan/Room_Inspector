@@ -103,6 +103,8 @@ def load_model(ckpt_path: Path, device: torch.device):
         raise ImportError("請安裝 timm：pip install timm")
 
     arch_map = {
+        "convnext_b_384": "convnext_base.fb_in22k_ft_in1k_384",
+        "swin_b_384":     "swin_base_patch4_window12_384.ms_in22k_ft_in1k",
         "convnext_t": "convnext_tiny.fb_in22k_ft_in1k",
         "swin_t":     "swin_tiny_patch4_window7_224.ms_in22k_ft_in1k",
         "convnext_s": "convnext_small.fb_in22k_ft_in1k",
@@ -116,8 +118,9 @@ def load_model(ckpt_path: Path, device: torch.device):
     model.eval()
 
     best_val_acc = state.get("best_val_acc", 0.0)
-    print(f"  架構：{arch}  類別：{classes}  訓練最佳 acc={best_val_acc:.4f}")
-    return model, arch, classes
+    img_size = state.get("img_size", 224)
+    print(f"  架構：{arch}  類別：{classes}  img_size={img_size}  訓練最佳 acc={best_val_acc:.4f}")
+    return model, arch, classes, img_size
 
 
 # ── 推論 ──────────────────────────────────────────────────────────────
@@ -414,7 +417,9 @@ def evaluate(args):
     if not ckpt_path.exists():
         raise FileNotFoundError(f"找不到 checkpoint：{ckpt_path}")
 
-    model, arch, classes = load_model(ckpt_path, device)
+    model, arch, classes, img_size = load_model(ckpt_path, device)
+    global IMG_SIZE
+    IMG_SIZE = img_size
 
     # ── 決定評估資料來源 ──────────────────────────────────────────
     if args.holdout_dir:
